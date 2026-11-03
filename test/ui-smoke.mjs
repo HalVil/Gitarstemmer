@@ -80,6 +80,7 @@ try {
     status: document.getElementById("status").textContent,
     start: document.getElementById("start").textContent,
     tone: document.getElementById("tone").textContent,
+    lock: document.getElementById("lock").textContent,
     flat: document.getElementById("label-flat").textContent,
     sharp: document.getElementById("label-sharp").textContent,
     strings: [...document.querySelectorAll(".string")].map((b) => b.textContent),
@@ -92,9 +93,10 @@ try {
   check(idle.title === "Gitarstemmer", "title");
   check(idle.h1 === "Gitarstemmer", "heading");
   check(idle.lang === "nb", "language nb");
-  check(idle.status === "Trykk Start og spill en streng.", "idle instruction");
-  check(idle.start === "Start", "start button");
-  check(idle.tone === "Spill tone", "reference button");
+    check(idle.status === "Trykk Start og spill strengene.", "idle instruction");
+    check(idle.start === "Start", "start button");
+    check(idle.tone === "Referansetone", "reference button");
+    check(idle.lock === "Lås streng", "lock button");
   check(idle.flat === "for lavt" && idle.sharp === "for høyt", "meter labels");
   check(idle.strings.length === 6, "six strings, got " + idle.strings.join(","));
   check(idle.sheet, "stylesheet loaded from /Gitarstemmer/");
@@ -102,8 +104,8 @@ try {
   check(idle.noteSize >= 90, "large readout (" + idle.noteSize + "px)");
 
   await evalValue(page, `
-    window.__freq = ${STRINGS[1].freq};
-    window.__cents = -18;
+    window.__freq = ${STRINGS[0].freq};
+    window.__cents = 0;
     window.__t = 0;
     AnalyserNode.prototype.getFloatTimeDomainData = function (arr) {
       const sr = this.context.sampleRate;
@@ -127,9 +129,18 @@ try {
   `);
 
   await evalValue(page, `document.getElementById("start").click()`);
-  const flat = await waitForState(page, (state) => state.note === "A" && state.status === "for lavt" && state.cents.includes("18"));
+  const held = await waitForState(
+    page,
+    (state) => state.note === "E" && state.octave === "2" && state.status === "stemt" && state.done === "0",
+    3000
+  );
+  check(held.ok, "low E held in tune gets a check (" + JSON.stringify(held.state) + ")");
+
+  await evalValue(page, `window.__freq = ${STRINGS[1].freq}; window.__cents = -18; window.__t = 0;`);
+  const flat = await waitForState(page, (state) => state.note === "A" && state.status === "for lavt" && state.cents.includes("18") && state.done === "0");
   check(flat.ok, "flat A shows for lavt (" + JSON.stringify(flat.state) + ")");
   check(flat.state && flat.state.active === "1", "A string highlighted");
+  check(flat.state && flat.state.which === "A-streng", "string name shown");
   await delay(250);
 
   const shotDir = process.env.SCREENSHOT_DIR || "/tmp";
@@ -153,18 +164,41 @@ try {
   const sharp = await waitForState(page, (s) => s.note === "E" && s.octave === "4" && s.status === "for høyt");
   check(sharp.ok, "sharp high E shows for høyt (" + JSON.stringify(sharp.state) + ")");
 
-  await evalValue(page, `document.querySelector('[data-index="0"]').click()`);
+  const untouched = await evalJson(page, `document.querySelector('[data-index="0"]').getAttribute("aria-pressed")`);
+  check(untouched === "false", "string tap does not lock during auto (" + untouched + ")");
+
+  await evalValue(page, `document.getElementById("lock").click(); document.querySelector('[data-index="0"]').click();`);
   const locked = await evalJson(page, `({
     pressed: document.querySelector('[data-index="0"]').getAttribute("aria-pressed"),
     hint: document.getElementById("hint").textContent,
+    lock: document.getElementById("lock").textContent,
     note: document.getElementById("note").textContent
   })`);
-  check(locked.pressed === "true" && locked.hint.includes("Låst") && locked.note === "E", "lock low E (" + JSON.stringify(locked) + ")");
+  check(locked.pressed === "true" && locked.hint.includes("Låst") && locked.lock === "Lås på", "lock low E (" + JSON.stringify(locked) + ")");
 
   await evalValue(page, `document.getElementById("tone").click()`);
-  await delay(150);
-  const playing = await evalJson(page, `document.getElementById("tone").textContent`);
-  check(typeof playing === "string" && playing.startsWith("Spiller"), "reference tone button (" + playing + ")");
+  await delay(80);
+  const toneOn = await evalJson(page, `({
+    pressed: document.getElementById("tone").getAttribute("aria-pressed"),
+    text: document.getElementById("tone").textContent,
+    hint: document.getElementById("hint").textContent
+  })`);
+  check(toneOn.pressed === "true" && toneOn.text === "Referansetone på" && toneOn.hint.includes("Trykk en streng"), "reference mode on (" + JSON.stringify(toneOn) + ")");
+
+  await evalValue(page, `document.querySelector('[data-index="2"]').click()`);
+  await delay(40);
+  await evalValue(page, `document.querySelector('[data-index="4"]').click()`);
+  await delay(40);
+  const sounding = await evalJson(page, `({
+    d: document.querySelector('[data-index="2"]').className,
+    b: document.querySelector('[data-index="4"]').className,
+    status: document.getElementById("status").textContent
+  })`);
+  check(sounding.b.includes("is-sounding") && !sounding.d.includes("is-sounding") && sounding.status === "Referansetone", "switching reference strings (" + JSON.stringify(sounding) + ")");
+
+  await evalValue(page, `document.getElementById("tone").click()`);
+  const toneOff = await evalJson(page, `document.querySelectorAll(".is-sounding").length + " " + document.getElementById("tone").textContent`);
+  check(toneOff === "0 Referansetone", "reference mode off (" + toneOff + ")");
 
   await open(page, BASE);
   await evalValue(page, `
@@ -305,6 +339,8 @@ async function waitForState(page, predicate, timeout = 3000) {
       status: document.getElementById("status").textContent,
       cents: document.getElementById("cents").textContent,
       active: [...document.querySelectorAll(".string")].findIndex((b) => b.classList.contains("is-on")).toString(),
+      done: [...document.querySelectorAll(".string")].findIndex((b) => b.classList.contains("is-done")).toString(),
+      which: document.getElementById("which").textContent,
       tuned: document.getElementById("app").className
     })`);
     if (predicate(state)) return { ok: true, state };

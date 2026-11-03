@@ -7,6 +7,7 @@
   var app = document.getElementById("app");
   var noteEl = document.getElementById("note");
   var octaveEl = document.getElementById("octave");
+  var whichEl = document.getElementById("which");
   var centsEl = document.getElementById("cents");
   var statusEl = document.getElementById("status");
   var meter = document.getElementById("meter");
@@ -15,6 +16,7 @@
   var hintEl = document.getElementById("hint");
   var messageEl = document.getElementById("message");
   var toneBtn = document.getElementById("tone");
+  var lockBtn = document.getElementById("lock");
   var startBtn = document.getElementById("start");
   var liveEl = document.getElementById("live");
 
@@ -25,20 +27,27 @@
   var raf = 0;
   var listening = false;
   var starting = false;
+  var referenceOn = false;
+  var lockMode = false;
   var lockedIndex = null;
+  var soundingIndex = null;
   var activeIndex = null;
   var lastFrequency = null;
   var heard = false;
-  var suspendUntil = 0;
   var lastLoop = 0;
-  var toneTimer = 0;
-  var toneNode = null;
+  var toneOsc = null;
+  var toneGain = null;
   var buffer = null;
   var byteBuffer = null;
   var announceKey = "";
+  var tunedFor = [0, 0, 0, 0, 0, 0];
+  var outFor = [0, 0, 0, 0, 0, 0];
+  var done = [false, false, false, false, false, false];
+  var lastTick = 0;
   var smoother = createSmoother();
 
   renderStrings();
+  updateChrome();
   setIdleCopy();
 
   startBtn.addEventListener("click", function () {
@@ -50,7 +59,33 @@
     begin();
   });
 
-  toneBtn.addEventListener("click", playReference);
+  toneBtn.addEventListener("click", function () {
+    referenceOn = !referenceOn;
+    if (referenceOn) {
+      lockMode = false;
+      lockedIndex = null;
+      var ctx = getAudioContext();
+      if (ctx) ctx.resume();
+    } else {
+      stopTone();
+    }
+    clearMessage();
+    updateChrome();
+  });
+
+  lockBtn.addEventListener("click", function () {
+    lockMode = !lockMode;
+    if (lockMode) {
+      referenceOn = false;
+      stopTone();
+    } else {
+      lockedIndex = null;
+    }
+    clearMessage();
+    updateChrome();
+    if (listening && lastFrequency) renderPitch({ frequency: lastFrequency });
+    else if (!listening) setIdleCopy();
+  });
 
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) {
@@ -62,10 +97,14 @@
   });
 
   document.body.addEventListener("pointerdown", function () {
-    if (audioContext && audioContext.state === "suspended") {
-      audioContext.resume();
-    }
+    if (audioContext && audioContext.state === "suspended") audioContext.resume();
   }, { passive: true });
+
+  function stringName(string) {
+    if (string.id === "E2") return "Lav E";
+    if (string.id === "E4") return "Høy E";
+    return string.name + "-streng";
+  }
 
   function renderStrings() {
     STRINGS.forEach(function (string, index) {
@@ -74,51 +113,33 @@
       button.className = "string";
       button.dataset.index = String(index);
       button.innerHTML =
+        '<span class="s-check" hidden>✓</span>' +
         '<span class="s-note">' + string.name + "<sup>" + string.octave + "</sup></span>" +
         '<span class="s-num">' + string.stringNumber + "</span>";
       button.addEventListener("click", function () {
-        toggleLock(index);
+        onString(index);
       });
       stringsEl.appendChild(button);
-      labelString(button, string, false, false);
     });
   }
 
-  function labelString(button, string, locked, active) {
-    var label = string.name + "-streng, streng " + string.stringNumber;
-    if (locked) label += ", låst";
-    else if (active) label += ", valgt";
-    button.setAttribute("aria-label", label);
-    button.setAttribute("aria-pressed", locked ? "true" : "false");
-  }
-
-  function toggleLock(index) {
+  function onString(index) {
+    if (referenceOn) {
+      soundString(index);
+      return;
+    }
+    if (!lockMode) return;
     lockedIndex = lockedIndex === index ? null : index;
     clearMessage();
-    updateHint();
-    if (listening && lastFrequency) {
-      renderPitch({ frequency: lastFrequency });
-      return;
-    }
-    centsEl.textContent = "\u00a0";
-    if (lockedIndex != null) {
+    updateChrome();
+    if (listening && lastFrequency) renderPitch({ frequency: lastFrequency });
+    else if (lockedIndex != null) {
       paintNote(STRINGS[lockedIndex]);
-      updateStringStyles(lockedIndex, false);
+      whichEl.textContent = stringName(STRINGS[lockedIndex]);
     } else {
       paintDash();
-      updateStringStyles(-1, false);
-      activeIndex = null;
+      whichEl.textContent = "";
     }
-  }
-
-  function updateHint() {
-    if (lockedIndex != null) {
-      hintEl.hidden = false;
-      hintEl.textContent = "Låst på " + STRINGS[lockedIndex].name + " · trykk igjen for auto";
-      return;
-    }
-    hintEl.hidden = true;
-    hintEl.textContent = "";
   }
 
   function begin() {
@@ -155,13 +176,10 @@
       startBtn.textContent = "Stopp";
       startBtn.classList.add("is-live");
       startBtn.setAttribute("aria-pressed", "true");
-      if (lockedIndex == null) {
-        hintEl.hidden = true;
-        hintEl.textContent = "";
-      }
-      setStatus("Lytter …");
-      setAppState("listening");
-      announce("lytter", "Lytter");
+      setStatus(referenceOn && soundingIndex != null ? "Referansetone" : "Lytter …");
+      if (!(referenceOn && soundingIndex != null)) setAppState("listening");
+      announce("lytter", "Lytter. Spill en streng.");
+      updateChrome();
       resumeLoop();
     }).catch(function (err) {
       starting = false;
@@ -173,28 +191,43 @@
     });
   }
 
+  function denied(err) {
+    return err && (err.name === "NotAllowedError" || err.name === "PermissionDeniedError");
+  }
+
+  function rawMic(constraints) {
+    return navigator.mediaDevices.getUserMedia(constraints);
+  }
+
+  /* Exact false/1 constraints make some browsers throw and fall back to
+     processed audio. ideal:false keeps echo cancellation, noise suppression
+     and auto gain off without failing the request. */
   function getMic() {
-    var attempts = [
-      {
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          channelCount: 1
-        }
-      },
-      { audio: true }
-    ];
-    var chain = Promise.reject({ name: "Start" });
-    attempts.forEach(function (constraints) {
-      chain = chain.catch(function (err) {
-        if (err && (err.name === "NotAllowedError" || err.name === "PermissionDeniedError")) {
-          throw err;
-        }
-        return navigator.mediaDevices.getUserMedia(constraints);
+    var clean = {
+      echoCancellation: { ideal: false },
+      noiseSuppression: { ideal: false },
+      autoGainControl: { ideal: false },
+      channelCount: { ideal: 1 }
+    };
+    return rawMic({ audio: clean }).catch(function (err) {
+      if (denied(err)) throw err;
+      var retry = {
+        echoCancellation: { ideal: false },
+        noiseSuppression: { ideal: false },
+        autoGainControl: { ideal: false }
+      };
+      return rawMic({ audio: retry });
+    }).then(function (mic) {
+      var track = mic.getAudioTracks()[0];
+      if (!track || !track.applyConstraints) return mic;
+      return track.applyConstraints({
+        echoCancellation: { ideal: false },
+        noiseSuppression: { ideal: false },
+        autoGainControl: { ideal: false }
+      }).catch(function () { /* already as clean as the device allows */ }).then(function () {
+        return mic;
       });
     });
-    return chain;
   }
 
   function stopListening() {
@@ -216,6 +249,9 @@
     lastFrequency = null;
     heard = false;
     activeIndex = lockedIndex;
+    tunedFor = [0, 0, 0, 0, 0, 0];
+    outFor = [0, 0, 0, 0, 0, 0];
+    done = [false, false, false, false, false, false];
     startBtn.disabled = false;
     startBtn.textContent = "Start";
     startBtn.classList.remove("is-live");
@@ -234,9 +270,9 @@
   function loop(timestamp) {
     raf = requestAnimationFrame(loop);
     if (!listening || !analyser) return;
-    if (timestamp - lastLoop < 48) return;
+    if (timestamp - lastLoop < 40) return;
     lastLoop = timestamp;
-    if (performance.now() < suspendUntil) return;
+    if (referenceOn && soundingIndex != null) return;
     var result = PD.detectPitch(readSamples(), audioContext.sampleRate);
     renderPitch(smoother.push(result));
   }
@@ -259,6 +295,7 @@
   function renderPitch(stable) {
     if (!stable) {
       lastFrequency = null;
+      lastTick = 0;
       centsEl.textContent = "\u00a0";
       setStatus(heard ? "Spill en streng" : "Lytter …");
       setAppState("listening");
@@ -266,38 +303,60 @@
       meter.setAttribute("aria-valuetext", "ingen tone");
       if (lockedIndex != null) {
         paintNote(STRINGS[lockedIndex]);
-        updateStringStyles(lockedIndex, false);
+        whichEl.textContent = stringName(STRINGS[lockedIndex]);
+        activeIndex = lockedIndex;
       } else {
         paintDash();
+        whichEl.textContent = "";
         activeIndex = null;
-        updateStringStyles(-1, false);
       }
+      updateChrome();
       announce(heard ? "vent" : "lytter", heard ? "Spill en streng" : "Lytter");
       return;
     }
 
     heard = true;
     lastFrequency = stable.frequency;
-    updateHint();
     var match = PD.closestString(stable.frequency);
     var index = lockedIndex != null ? lockedIndex : match.index;
     var target = STRINGS[index];
     var cents = PD.centsBetween(stable.frequency, target.freq);
     var word = PD.verdict(cents);
     activeIndex = index;
+    trackTune(index, cents);
 
     paintNote(target);
+    whichEl.textContent = stringName(target);
     centsEl.textContent = formatCents(cents);
     setStatus(word);
     setAppState(word === "stemt" ? "tuned" : word === "for lavt" ? "flat" : "sharp");
     moveNeedle(cents);
-    updateStringStyles(index, word === "stemt");
+    updateChrome();
 
     var shown = Math.round(cents);
     var sentence = word === "stemt"
-      ? target.name + "-streng, stemt"
-      : target.name + "-streng, " + Math.abs(shown) + " cent " + word;
+      ? stringName(target) + ", stemt"
+      : stringName(target) + ", " + Math.abs(shown) + " cent " + word;
     announce(target.id + ":" + word + ":" + Math.round(shown / 3), sentence);
+  }
+
+  function trackTune(index, cents) {
+    var now = performance.now();
+    var dt = lastTick ? Math.min(160, now - lastTick) : 45;
+    lastTick = now;
+    var shown = Math.round(cents);
+    if (Math.abs(shown) <= PD.IN_TUNE_CENTS) {
+      tunedFor[index] += dt;
+      outFor[index] = 0;
+      if (!done[index] && tunedFor[index] >= 850) {
+        done[index] = true;
+        announce("ferdig-" + index, stringName(STRINGS[index]) + " er stemt");
+      }
+    } else if (Math.abs(shown) > 12) {
+      tunedFor[index] = 0;
+      outFor[index] += dt;
+      if (outFor[index] > 400) done[index] = false;
+    }
   }
 
   function paintNote(string) {
@@ -326,30 +385,83 @@
   function updateStringStyles(active, tuned) {
     var buttons = stringsEl.querySelectorAll(".string");
     for (var i = 0; i < buttons.length; i++) {
-      var on = i === active;
-      var locked = i === lockedIndex;
+      var on = i === active && !(referenceOn && soundingIndex != null);
+      var locked = lockMode && i === lockedIndex;
+      var sounding = referenceOn && i === soundingIndex;
       buttons[i].classList.toggle("is-on", on || locked);
       buttons[i].classList.toggle("is-locked", locked);
       buttons[i].classList.toggle("is-tuned", on && tuned);
-      labelString(buttons[i], STRINGS[i], locked, on && !locked);
+      buttons[i].classList.toggle("is-done", done[i]);
+      buttons[i].classList.toggle("is-sounding", sounding);
+      var mark = buttons[i].querySelector(".s-check");
+      if (mark) mark.hidden = !done[i];
+      var label = stringName(STRINGS[i]) + ", streng " + STRINGS[i].stringNumber;
+      if (done[i]) label += ", stemt";
+      if (sounding) label += ", spiller";
+      else if (locked) label += ", låst";
+      else if (on) label += ", valgt";
+      buttons[i].setAttribute("aria-label", label);
+      buttons[i].setAttribute("aria-pressed", locked || sounding ? "true" : "false");
     }
+  }
+
+  function updateChrome() {
+    toneBtn.setAttribute("aria-pressed", referenceOn ? "true" : "false");
+    toneBtn.classList.toggle("is-on", referenceOn);
+    toneBtn.textContent = referenceOn ? "Referansetone på" : "Referansetone";
+    lockBtn.setAttribute("aria-pressed", lockMode ? "true" : "false");
+    lockBtn.classList.toggle("is-on", lockMode);
+    lockBtn.textContent = lockMode ? "Lås på" : "Lås streng";
+    stringsEl.classList.toggle("is-playable", referenceOn);
+    stringsEl.classList.toggle("is-lockable", lockMode && !referenceOn);
+    app.classList.toggle("is-reference", referenceOn);
+
+    if (referenceOn) {
+      hintEl.hidden = false;
+      hintEl.textContent = soundingIndex == null
+        ? "Trykk en streng"
+        : "Spiller " + stringName(STRINGS[soundingIndex]);
+      if (soundingIndex != null && !listening) {
+        paintNote(STRINGS[soundingIndex]);
+        whichEl.textContent = stringName(STRINGS[soundingIndex]);
+        setStatus("Referansetone");
+      }
+    } else if (lockMode) {
+      hintEl.hidden = false;
+      hintEl.textContent = lockedIndex == null
+        ? "Trykk strengen du vil stemme"
+        : "Låst på " + stringName(STRINGS[lockedIndex]);
+    } else {
+      hintEl.hidden = true;
+      hintEl.textContent = "";
+    }
+
+    var tuned = app.classList.contains("is-tuned");
+    var shownActive = referenceOn && soundingIndex != null ? soundingIndex : activeIndex;
+    updateStringStyles(shownActive == null ? -1 : shownActive, tuned);
   }
 
   function setIdleCopy() {
     setAppState("idle");
-    setStatus("Trykk Start og spill en streng.");
     centsEl.textContent = "\u00a0";
     meter.setAttribute("aria-valuenow", "0");
     meter.setAttribute("aria-valuetext", "ingen tone");
     needle.style.left = "50%";
-    if (lockedIndex != null) {
+    if (referenceOn && soundingIndex != null) {
+      paintNote(STRINGS[soundingIndex]);
+      whichEl.textContent = stringName(STRINGS[soundingIndex]);
+      setStatus("Referansetone");
+    } else if (lockedIndex != null) {
       paintNote(STRINGS[lockedIndex]);
-      updateStringStyles(lockedIndex, false);
+      whichEl.textContent = stringName(STRINGS[lockedIndex]);
+      setStatus("Trykk Start og spill strengene.");
     } else {
       paintDash();
-      updateStringStyles(-1, false);
+      whichEl.textContent = "";
+      setStatus("Trykk Start og spill strengene.");
     }
-    announce("idle", "Trykk Start og spill en streng");
+    updateChrome();
+    announce("idle", "Trykk Start og spill strengene");
   }
 
   function setStatus(text) {
@@ -367,43 +479,50 @@
     return (shown > 0 ? "+" : "−") + Math.abs(shown) + " cent";
   }
 
-  function playReference() {
-    var index = lockedIndex != null ? lockedIndex : activeIndex;
-    if (index == null) {
-      hintEl.hidden = false;
-      hintEl.textContent = "Trykk på en streng først.";
-      return;
-    }
+  function soundString(index) {
     var ctx = getAudioContext();
     if (!ctx) {
       showMessage("Kunne ikke spille lyd i denne nettleseren.");
       return;
     }
     ctx.resume();
-    if (lockedIndex == null) updateHint();
-    var string = STRINGS[index];
-    suspendUntil = performance.now() + 1700;
-    if (toneNode) {
-      try { toneNode.stop(); } catch (e) { /* already ended */ }
+    if (!toneOsc) {
+      toneOsc = ctx.createOscillator();
+      toneGain = ctx.createGain();
+      toneOsc.type = "triangle";
+      toneGain.gain.value = 0.0001;
+      toneOsc.connect(toneGain);
+      toneGain.connect(ctx.destination);
+      toneOsc.start();
     }
-    var osc = ctx.createOscillator();
-    var gain = ctx.createGain();
-    osc.type = "triangle";
-    osc.frequency.value = string.freq;
     var now = ctx.currentTime;
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.12, now + 0.03);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.25);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + 1.3);
-    toneNode = osc;
-    toneBtn.textContent = "Spiller " + string.name + " …";
-    clearTimeout(toneTimer);
-    toneTimer = setTimeout(function () {
-      toneBtn.textContent = "Spill tone";
-    }, 1300);
+    toneOsc.frequency.cancelScheduledValues(now);
+    toneOsc.frequency.setTargetAtTime(STRINGS[index].freq, now, 0.012);
+    toneGain.gain.cancelScheduledValues(now);
+    toneGain.gain.setTargetAtTime(0.1, now, 0.02);
+    soundingIndex = index;
+    activeIndex = index;
+    centsEl.textContent = "\u00a0";
+    needle.style.left = "50%";
+    paintNote(STRINGS[index]);
+    whichEl.textContent = stringName(STRINGS[index]);
+    setStatus("Referansetone");
+    setAppState(listening ? "listening" : "idle");
+    updateChrome();
+  }
+
+  function stopTone() {
+    soundingIndex = null;
+    if (!toneOsc) return;
+    var now = audioContext ? audioContext.currentTime : 0;
+    try {
+      toneGain.gain.cancelScheduledValues(now);
+      toneGain.gain.setTargetAtTime(0.0001, now, 0.015);
+      var osc = toneOsc;
+      osc.stop(now + 0.06);
+    } catch (e) { /* already stopped */ }
+    toneOsc = null;
+    toneGain = null;
   }
 
   function getAudioContext() {
@@ -467,7 +586,7 @@
           misses += 1;
           pending = null;
           pendingCount = 0;
-          if (misses >= 8) {
+          if (misses >= 12) {
             history = [];
             return null;
           }
@@ -478,20 +597,23 @@
         misses = 0;
         var freq = result.frequency;
         var current = median();
-        if (current != null && Math.abs(1200 * Math.log2(freq / current)) > 70) {
-          if (pending != null && Math.abs(1200 * Math.log2(freq / pending)) < 25) {
-            pendingCount += 1;
-          } else {
-            pending = freq;
-            pendingCount = 1;
+        if (current != null) {
+          var jump = Math.abs(1200 * Math.log2(freq / current));
+          if (jump > 70) {
+            var needed = jump > 1000 ? 3 : 2;
+            if (pending != null && Math.abs(1200 * Math.log2(freq / pending)) < 25) pendingCount += 1;
+            else {
+              pending = freq;
+              pendingCount = 1;
+            }
+            if (pendingCount >= needed) {
+              history = [freq];
+              pending = null;
+              pendingCount = 0;
+              return { frequency: freq, clarity: result.clarity };
+            }
+            return { frequency: current, held: true };
           }
-          if (pendingCount >= 2) {
-            history = [freq];
-            pending = null;
-            pendingCount = 0;
-            return { frequency: freq, clarity: result.clarity };
-          }
-          return { frequency: current, held: true };
         }
 
         pending = null;

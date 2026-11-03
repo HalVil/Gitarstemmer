@@ -23,6 +23,7 @@
         <p class="note-wrap">
           <span class="note" id="note" translate="no">–</span><sup class="octave" id="octave" translate="no" hidden></sup>
         </p>
+        <p class="which" id="which"></p>
         <p class="cents" id="cents">&nbsp;</p>
       </div>
 
@@ -46,7 +47,7 @@
           </div>
           <div class="needle" id="needle"></div>
         </div>
-        <p class="status" id="status">Trykk Start og spill en streng.</p>
+        <p class="status" id="status">Trykk Start og spill strengene.</p>
       </div>
     </section>
 
@@ -55,7 +56,10 @@
     <p class="message" id="message" hidden></p>
 
     <div class="actions">
-      <button type="button" class="ghost" id="tone">Spill tone</button>
+      <div class="secondary">
+        <button type="button" class="mini" id="tone" aria-pressed="false">Referansetone</button>
+        <button type="button" class="mini" id="lock" aria-pressed="false">Lås streng</button>
+      </div>
       <button type="button" class="start" id="start" aria-pressed="false">Start</button>
     </div>
   </main>
