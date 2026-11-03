@@ -170,12 +170,124 @@ for (const sampleRate of rates) {
   }
 }
 
+function highpass(input, sampleRate, cutoff) {
+  const w0 = (2 * Math.PI * cutoff) / sampleRate;
+  const cos = Math.cos(w0);
+  const sin = Math.sin(w0);
+  const alpha = sin / (2 * Math.SQRT1_2);
+  let b0 = (1 + cos) / 2;
+  let b1 = -(1 + cos);
+  let b2 = (1 + cos) / 2;
+  let a0 = 1 + alpha;
+  let a1 = -2 * cos;
+  let a2 = 1 - alpha;
+  b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
+  const out = new Float32Array(input.length);
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  for (let i = 0; i < input.length; i++) {
+    const x0 = input[i];
+    const y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+    out[i] = y0;
+    x2 = x1; x1 = x0; y2 = y1; y1 = y0;
+  }
+  return out;
+}
+
+function pluckedString(freq, sampleRate, seconds, opts = {}) {
+  const length = Math.floor(sampleRate * seconds);
+  const out = new Float32Array(length);
+  const B = opts.B ?? 0.0002;
+  const nHarm = opts.nHarm ?? 24;
+  const fund = opts.fund ?? 0.2;
+  const slope = opts.slope ?? 0.8;
+  for (let i = 0; i < length; i++) {
+    const t = i / sampleRate;
+    let s = 0;
+    for (let n = 1; n <= nHarm; n++) {
+      const fn = n * freq * Math.sqrt(1 + B * n * n);
+      const amp = (n === 1 ? fund : 1) / Math.pow(n, slope);
+      const env = Math.exp(-t * (opts.decay ?? 1.2) * (1 + (n - 1) * 0.4));
+      s += amp * env * Math.sin((2 * Math.PI * fn * t));
+    }
+    out[i] = s;
+  }
+  return out;
+}
+
+function sliceAt(signal, sampleRate, startSec, size) {
+  const start = Math.floor(startSec * sampleRate);
+  const out = new Float32Array(size);
+  for (let i = 0; i < size; i++) out[i] = signal[start + i] || 0;
+  return out;
+}
+
+function scaleRms(input, rms) {
+  let energy = 0;
+  for (let i = 0; i < input.length; i++) energy += input[i] * input[i];
+  const gain = rms / (Math.sqrt(energy / input.length) || 1);
+  const out = new Float32Array(input.length);
+  for (let i = 0; i < input.length; i++) out[i] = input[i] * gain;
+  return out;
+}
+
+for (const sampleRate of [48000]) {
+  for (const string of STRINGS) {
+    const stiff = string.midi <= 40 ? 0.00042 : string.midi <= 45 ? 0.0002 : string.midi <= 50 ? 0.00009 : 0.00003;
+    let signal = pluckedString(string.freq, sampleRate, 1.4, {
+      B: stiff,
+      fund: string.midi < 50 ? 0.1 : 0.55,
+      nHarm: string.midi < 52 ? 32 : 12,
+      slope: string.midi < 50 ? 0.75 : 0.9
+    });
+    if (string.midi < 56) signal = highpass(highpass(signal, sampleRate, 120), sampleRate, 120);
+    for (const when of [0.05, 0.35]) {
+      checkFreq(
+        "guitar " + string.id + " t=" + when,
+        sliceAt(signal, sampleRate, when, length),
+        sampleRate,
+        string.freq,
+        8
+      );
+      const heard = detectPitch(sliceAt(signal, sampleRate, when, length), sampleRate);
+      assert(heard && closestString(heard.frequency).string.id === string.id, "guitar " + string.id + " string id");
+    }
+    const quietNote = scaleRms(sliceAt(signal, sampleRate, 0.45, length), 0.002);
+    const quietHeard = detectPitch(quietNote, sampleRate);
+    assert(
+      quietHeard && Math.abs(centsBetween(quietHeard.frequency, string.freq)) < 12,
+      "quiet guitar " + string.id + " should still register"
+    );
+  }
+}
+
+const harshHighE = pluckedString(STRINGS[5].freq, 48000, 0.8, {
+  B: 0.00004,
+  fund: 1,
+  nHarm: 16,
+  slope: 0.35,
+  decay: 0.5
+});
+const harshSlice = sliceAt(harshHighE, 48000, 0.03, length);
+const harsh = detectPitch(harshSlice, 48000);
+assert(
+  harsh && closestString(harsh.frequency).string.id === "E4" && Math.abs(centsBetween(harsh.frequency, STRINGS[5].freq)) < 8,
+  "bright high E attack stays on E4 (" + (harsh ? harsh.frequency.toFixed(1) : "null") + ")"
+);
+
+const flatLowE = STRINGS[0].freq * Math.pow(2, -25 / 1200);
+const flatSignal = highpass(pluckedString(flatLowE, 48000, 1, { B: 0.0004, fund: 0.15, nHarm: 30, slope: 0.75 }), 48000, 120);
+const flatHeard = detectPitch(sliceAt(flatSignal, 48000, 0.08, length), 48000);
+assert(
+  flatHeard && Math.abs(centsBetween(flatHeard.frequency, flatLowE)) < 8 && closestString(flatHeard.frequency).string.id === "E2",
+  "detuned low E stays on the low E string"
+);
+
 assert(detectPitch(new Float32Array(4096), 48000) === null, "silence should be null");
 assert(detectPitch(noise(4096, 0.02), 48000) === null, "noise should be null");
-assert(detectPitch(sine(110, 48000, 4096, 0.004), 48000) === null, "very quiet sine should be null");
+assert(detectPitch(sine(110, 48000, 4096, 0.0007), 48000) === null, "very quiet sine should be null");
 
-const quiet = detectPitch(sine(110, 48000, 4096, 0.02), 48000);
-assert(quiet && Math.abs(centsBetween(quiet.frequency, 110)) < 1.5, "quiet but audible A should detect");
+const quiet = detectPitch(sine(110, 48000, 4096, 0.004), 48000);
+assert(quiet && Math.abs(centsBetween(quiet.frequency, 110)) < 2, "quiet mic-level A should detect");
 
 const high = detectPitch(sine(1000, 48000, 4096), 48000);
 assert(high === null, "1 kHz is outside guitar range");

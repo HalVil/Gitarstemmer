@@ -109,8 +109,18 @@ h1 {
   color: var(--muted);
 }
 
+.which {
+  margin: 0.35rem 0 0;
+  min-height: 1.35em;
+  text-align: center;
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+
 .cents {
-  margin: 0.55rem 0 0;
+  margin: 0.35rem 0 0;
   min-height: 1.4em;
   font-size: 1.2rem;
   font-variant-numeric: tabular-nums;
@@ -193,6 +203,7 @@ h1 {
 }
 
 .string {
+  position: relative;
   appearance: none;
   border: 1px solid var(--line);
   background: var(--bg-2);
@@ -205,8 +216,11 @@ h1 {
   align-items: center;
   justify-content: center;
   gap: 0.2rem;
-  cursor: pointer;
+  cursor: default;
 }
+
+.strings.is-playable .string,
+.strings.is-lockable .string { cursor: pointer; }
 
 .s-note {
   font-family: var(--serif);
@@ -229,9 +243,29 @@ h1 {
 }
 
 .string.is-on {
-  border-color: #e6d7a8;
-  background: #2a2e22;
+  border-color: #f3f0e6;
+  background: #2c3224;
+  box-shadow: 0 0 0 1px #f3f0e6;
 }
+
+.string.is-done { border-color: rgba(143, 206, 138, 0.85); }
+
+.s-check {
+  position: absolute;
+  top: 0.28rem;
+  right: 0.22rem;
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 99px;
+  background: var(--green);
+  color: #142116;
+  font-size: 0.66rem;
+  font-weight: 800;
+  line-height: 0.95rem;
+  text-align: center;
+}
+
+.s-check[hidden] { display: none; }
 
 .string.is-on.is-tuned {
   border-color: var(--green);
@@ -239,15 +273,20 @@ h1 {
 }
 
 .string.is-locked {
-  background: var(--cream);
-  color: #171910;
-  border-color: var(--cream);
+  border-style: dashed;
+  border-color: #f3f0e6;
 }
 
-.string.is-locked .s-num,
-.string.is-locked .s-note sup { color: #5c584e; }
+.string.is-sounding {
+  background: #f3e2b0;
+  color: #241c0c;
+  border-color: #f3e2b0;
+}
 
-.string.is-locked.is-tuned { box-shadow: inset 0 0 0 2px #2f7a45; }
+.string.is-sounding .s-num,
+.string.is-sounding .s-note sup { color: #6a5b32; }
+
+.strings.is-playable .string { border-color: #6e6244; }
 
 .hint, .message {
   margin: 0.75rem 0 0;
@@ -271,23 +310,35 @@ h1 {
   padding-top: 1.15rem;
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 0.55rem;
 }
 
-.ghost, .start {
+.secondary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+}
+
+.mini, .start {
   appearance: none;
   width: 100%;
   border-radius: 999px;
   cursor: pointer;
 }
 
-.ghost {
-  height: 2.7rem;
-  border: 0;
+.mini {
+  height: 2.35rem;
+  border: 1px solid var(--line);
   background: transparent;
   color: var(--muted);
-  font-size: 0.98rem;
-  font-weight: 600;
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.mini.is-on {
+  background: #f3e2b0;
+  border-color: #f3e2b0;
+  color: #241c0c;
 }
 
 .start {
@@ -322,8 +373,12 @@ h1 {
 }
 
 .app.is-tuned .note.has-note,
+.app.is-tuned .which,
 .app.is-tuned .cents,
 .app.is-tuned .status { color: var(--green); }
+
+.app.is-flat .which,
+.app.is-sharp .which { color: var(--ink); }
 
 .app.is-flat .cents,
 .app.is-sharp .cents,
@@ -343,9 +398,10 @@ h1 {
 .app.is-tuned .needle { opacity: 1; }
 
 @media (hover: hover) {
-  .string:hover { border-color: #8d927f; }
-  .string.is-locked:hover { border-color: var(--cream); }
-  .ghost:hover { color: var(--ink); }
+  .strings.is-playable .string:hover,
+  .strings.is-lockable .string:hover { border-color: #c8c2b4; }
+  .mini:hover { color: var(--ink); }
+  .mini.is-on:hover { color: #241c0c; }
   .start:hover { filter: brightness(0.96); }
   .start.is-live:hover { filter: none; border-color: #8d927f; }
 }

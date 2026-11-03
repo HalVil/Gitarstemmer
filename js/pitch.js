@@ -210,6 +210,43 @@
     return sampleRate / better;
   }
 
+  function lowpass(samples, sampleRate, cutoff) {
+    var w0 = 2 * Math.PI * cutoff / sampleRate;
+    var cos = Math.cos(w0);
+    var alpha = Math.sin(w0) / (2 * Math.SQRT1_2);
+    var b0 = (1 - cos) / 2;
+    var b1 = 1 - cos;
+    var b2 = (1 - cos) / 2;
+    var a0 = 1 + alpha;
+    var a1 = -2 * cos;
+    var a2 = 1 - alpha;
+    b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
+    function pass(input) {
+      var out = new Float32Array(input.length);
+      var x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+      for (var i = 0; i < input.length; i++) {
+        var x0 = input[i];
+        var y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        out[i] = y0;
+        x2 = x1; x1 = x0; y2 = y1; y1 = y0;
+      }
+      return out;
+    }
+    return pass(pass(samples));
+  }
+
+  /* Extra zero crossings mean upper partials are bending the waveform.
+     A plain sine or saw has about two crossings per period. */
+  function partialRichness(samples, sampleRate, freq) {
+    var crossings = 0;
+    for (var i = 1; i < samples.length; i++) {
+      if ((samples[i] >= 0) !== (samples[i - 1] >= 0)) crossings++;
+    }
+    var expected = 2 * freq * (samples.length / sampleRate);
+    if (!(expected > 1)) return 1;
+    return crossings / expected;
+  }
+
   function detectPitch(samples, sampleRate, options) {
     options = options || {};
     if (!samples || samples.length < 512 || !(sampleRate > 0)) return null;
@@ -218,16 +255,38 @@
     var mean = 0;
     for (var i = 0; i < length; i++) mean += samples[i];
     mean /= length;
-
+    var centered = new Float32Array(length);
     var energy = 0;
     for (var n = 0; n < length; n++) {
-      var d = samples[n] - mean;
-      energy += d * d;
+      centered[n] = samples[n] - mean;
+      energy += centered[n] * centered[n];
     }
     var rms = Math.sqrt(energy / length);
-    var rmsThreshold = options.rmsThreshold != null ? options.rmsThreshold : 0.008;
+    var rmsThreshold = options.rmsThreshold != null ? options.rmsThreshold : 0.0012;
     if (rms < rmsThreshold) return null;
 
+    var reading = estimatePitch(centered, sampleRate, options, 0, rms);
+    var richness = reading ? partialRichness(centered, sampleRate, reading.frequency) : 1;
+    if (reading && richness > 1.75) {
+      var fc = Math.min(1800, Math.max(300, reading.frequency * 3.2));
+      var alt = estimatePitch(lowpass(centered, sampleRate, fc), sampleRate, options, 0, rms);
+      if (alt && alt.clarity >= 0.88) {
+        var shift = 1200 * Math.log2(alt.frequency / reading.frequency);
+        var unclear = reading.clarity < 0.96;
+        var brightAndSharp = richness > 2.5 && shift < -5 && shift > -60;
+        var octaveUp = shift > 900 && shift < 1500 && alt.clarity + 0.04 >= reading.clarity;
+        if ((Math.abs(shift) <= 70 && (unclear || brightAndSharp)) || octaveUp) reading = alt;
+      }
+    }
+    if (!reading) {
+      var rescue = estimatePitch(lowpass(centered, sampleRate, 650), sampleRate, options, 0, rms);
+      if (rescue && rescue.clarity >= 0.9) reading = rescue;
+    }
+    return reading;
+  }
+
+  function estimatePitch(samples, sampleRate, options, mean, rms) {
+    var length = samples.length;
     var minFreq = options.minFreq || 60;
     var maxFreq = options.maxFreq || 480;
     var clarityThreshold = options.clarityThreshold != null ? options.clarityThreshold : 0.78;
